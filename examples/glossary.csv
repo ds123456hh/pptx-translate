@@ -1,0 +1,20 @@
+source,target
+# One rule per line: source term -> how it must appear in the translation.
+# Pass with:  --glossary examples/glossary.csv
+#
+# Terms listed here OVERRIDE the built-in proper-noun list AND are locked with
+# [[Gn]] placeholders, so the model cannot translate them away.
+#
+# Keep this file to real terminology. Locking a general word to English makes
+# sentences read worse, not better.
+
+# --- translate these terms into Chinese (override the built-in "keep English" default)
+prompt injection,提示注入
+jailbreak,越狱攻击
+hallucination,幻觉
+
+# --- force these to stay English (same as the built-in behaviour)
+LLM,LLM
+OWASP,OWASP
+MITRE ATT&CK,MITRE ATT&CK
+CVE,CVE

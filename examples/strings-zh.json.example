@@ -1,0 +1,12 @@
+{
+  "_comment": "Pre-translated strings for --strings-json. Keys are the EXACT source paragraphs from the deck; values are the translations. Any key you omit keeps its English text. Produce a full key list with --dump-strings strings.json, translate the values, then pass this file back in.",
+  "_soft_break": "In JSON, write a manual line break as \\u000b (or \\n). It is restored as the original <a:br/>.",
+  "_emoji": "Copy emoji exactly as they appear; they are protected automatically.",
+
+  "What Are LLM": "什么是 LLM",
+  "Why LLMs Are Vulnerable": "为什么 LLM 如此脆弱",
+  "Prompt Injection": "提示注入",
+  "🛡️ Simulated Attacks\u000bFriendly knights test your castle walls.": "🛡️ 模拟攻击\u000b友好的骑士来测试你的城墙。",
+  "TTPs (Tactics, Techniques, and Procedures)": "TTPs（战术、技术和程序）",
+  "OWASP Top 10 | AI Incident DB | AVID": "OWASP Top 10 | AI 事件库 | AVID"
+}

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pptx-translate"
+version = "1.0.0"
+description = "Format-preserving PowerPoint translation: translate .pptx text into another language without changing a single pixel of layout."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "pptx-translate contributors" }]
+keywords = ["pptx", "powerpoint", "translation", "localization", "i18n", "office"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Office Suites",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    "python-pptx>=1.0",
+    "lxml>=5.0",
+]
+
+[project.optional-dependencies]
+# In-process translation with a local HuggingFace model (no API key, no cost).
+local = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "huggingface_hub>=0.23",
+    "sentencepiece>=0.2",
+]
+# Everything needed for the local render check used by scripts/verify_pptx.py.
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+pptx-translate = "pptx_translate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/OWNER/pptx-translate"
+Issues = "https://github.com/OWNER/pptx-translate/issues"
+
+[tool.setuptools]
+packages = ["pptx_translate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

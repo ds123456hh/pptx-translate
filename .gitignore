@@ -1,0 +1,37 @@
+# ---- secrets / credentials -------------------------------------------------
+.env
+.env.*
+*.key
+credentials.json
+.cache/
+
+# ---- generated artifacts (never commit decks or translation memory) ---------
+out/
+*.pptx
+*.pptm
+*.report.json
+*.cache.json
+!examples/**/*.json
+
+# ---- local models ----------------------------------------------------------
+models/
+*.safetensors
+*.bin
+*.gguf
+*.onnx
+
+# ---- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# ---- tooling ---------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
