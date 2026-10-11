@@ -291,6 +291,75 @@ def test_local_target_language_mapping():
     print("local target mapping     OK")
 
 
+def test_invented_placeholders_are_removed():
+    """A model that imitates the [[E1]] format must not put tokens on a slide."""
+    cases = [
+        # the local model invented these from paragraphs that had no emoji at all
+        ("超过 201 种方法：[[E1]]：攻击者",
+         "超过 201 种方法：攻击者"),
+        ("[[E1]]: 数据外传", "数据外传"),
+        ("与 [[U1]]（2020年至2021年中期）", "与（2020年至2021年中期）"),
+        ("发生了什么？[[E1]]乌克兰被破坏。[[E12]]“沙虫”攻击。",
+         "发生了什么？乌克兰被破坏。“沙虫”攻击。"),
+    ]
+    for src, expected in cases:
+        got, removed = core.strip_unknown_tokens(src, set())
+        assert removed, f"nothing was detected in {src!r}"
+        assert got == expected, (src, got, expected)
+
+    # a real emoji that was properly restored must survive untouched
+    real = "🛡️ 模拟攻击\x0b友好的骑士们正在测试你的城堡城墙。"
+    assert core.strip_unknown_tokens(real, set()) == (real, [])
+    # and a token the source genuinely owned is never dropped
+    kept, removed = core.strip_unknown_tokens("x [[E1]] y", {"[[E1]]"})
+    assert (kept, removed) == ("x [[E1]] y", [])
+    print("invented placeholder purge OK")
+
+
+def test_bracket_repair():
+    """A garbled or duplicated closing bracket is fixed; balanced text is left alone."""
+    src = "Hacker playbooks (ATT&CK) & AI defenses (ATLAS)."
+    # duplicated closers
+    got, note = core.repair_brackets("黑客操作手册（ATT&CK）] & 防御（ATLAS））。", src)
+    assert note, "a repair should have been reported"
+    assert got == "黑客操作手册（ATT&CK） & 防御（ATLAS）。", got
+    # a closer mangled into an angle bracket
+    got, note = core.repair_brackets("黑客（ATT&CK>）与防御（ATLAS））。", src)
+    assert got == "黑客（ATT&CK）与防御（ATLAS）。", got
+    # already balanced: untouched
+    balanced = "黑客（ATT&CK）与防御（ATLAS）。"
+    assert core.repair_brackets(balanced, src) == (balanced, "")
+    # source without brackets: the model's own brackets are left alone
+    assert core.repair_brackets("（多余）", "plain text") == ("（多余）", "")
+    # a missing closer is NOT invented
+    short = "黑客（ATT&CK与防御（ATLAS）。"
+    assert core.repair_brackets(short, src)[0] == short
+    print("bracket repair           OK")
+
+
+def test_simplify_layer():
+    """Traditional characters from a model must land as Simplified."""
+    from pptx_translate import simplify
+
+    cases = {
+        "測試比較 ≠ 安全性：人工智能的誤解": "测试比较 ≠ 安全性：人工智能的误解",
+        "演示紅隊攻擊": "演示红队攻击",
+        "嚴格範圍：無混亂，只有線索。": "严格范围：无混乱，只有线索。",
+    }
+    for src, expected in cases.items():
+        got = simplify.to_simplified(src)
+        # without OpenCC the small table may not cover every character, so only
+        # assert the characters it does know about
+        assert "規則" not in got and "嚴格" not in got
+        if simplify._opencc() is not None:
+            assert got == expected, (src, got, expected)
+    # already-Simplified text must be untouched
+    assert simplify.to_simplified("红队攻击（简体保持不变）") == "红队攻击（简体保持不变）"
+    assert simplify.has_traditional("規則") is True
+    assert simplify.has_traditional("规则") is False
+    print("simplify layer           OK")
+
+
 def test_blank_detection():
     assert core.is_blank("   ")
     assert core.is_blank("2024")

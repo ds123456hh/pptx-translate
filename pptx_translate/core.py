@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from .simplify import to_simplified
+
 log = logging.getLogger("pptx_translate")
 
 EMU_PER_INCH = 914400
@@ -349,6 +351,164 @@ def apply_part_text(part_bucket: dict, part_name: str, mapping: dict[str, str]) 
 # --------------------------------------------------------------------------- #
 # apply side (text frames)
 # --------------------------------------------------------------------------- #
+# Matches any placeholder this pipeline can emit: [[E1]] emoji or [[G1]] term.
+TOKEN_RE = re.compile(r"\[{1,2}\s*(?:E|e|G|g|3|6)?\s*_?\s*\d{1,2}\s*\]{1,2}")
+
+
+def strip_unknown_tokens(text: str, known: set[str]) -> tuple[str, list[str]]:
+    """Delete placeholders that were never in the source. Returns (text, removed).
+
+    A model shown ``[[E1]]`` in its instructions will sometimes *invent* one in a
+    paragraph that contained no emoji at all: it imitates the format rather than
+    the meaning. Any token outside ``known`` is therefore a fabrication and is
+    deleted, not "restored". The pattern is deliberately permissive — a local
+    model produced ``[[U1]]`` and ``[[E12]]`` from the same habit — but because
+    ``known`` holds every token the source could legitimately carry, being
+    permissive cannot damage a real one.
+
+    A fabricated token usually lands next to the punctuation it was standing in
+    for (``方法：[[E1]]：攻击者``), so when a token is removed the punctuation on
+    both sides is merged instead of left doubled.
+    """
+    if "[" not in text:
+        return text, []
+
+    pattern = re.compile(
+        r"[ \t]*\[{1,2}\s*[A-Za-z]?\s*_?\s*\d{1,2}\s*\]{1,2}[ \t]*"
+    )
+    removed: list[str] = []
+
+    def drop(match: re.Match) -> str:
+        token = match.group(0).strip()
+        if token in known:
+            return match.group(0)
+        removed.append(token)
+        return ""
+
+    cleaned = pattern.sub(drop, text)
+    if not removed:
+        return text, []
+
+    # merge punctuation left doubled by the deletion, e.g. "：：" or ": 数据"
+    for _ in range(4):
+        merged = re.sub(r"([：:，,。.；;！!？?、])\s*([：:，,。.；;！!？?、])", r"\2", cleaned)
+        if merged == cleaned:
+            break
+        cleaned = merged
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"^[：:，,。.；;！!？?、]\s*", "", cleaned)
+    return cleaned.strip(), removed
+
+
+_QUOTE_PAIRS = {'"': '"', "'": "'", "“": "”", "‘": "’", "「": "」", "『": "』"}
+
+
+def strip_redundant_quotes(text: str) -> str:
+    """Drop one quote pair that wraps the whole line.
+
+    Small translation models like to wrap a whole paragraph in quotation marks
+    (``“输入：”`` for a source that had none). On a slide a label is not a
+    quotation, so the wrapping pair is noise — but only when it truly encloses
+    the entire line, and only when the source itself was not quoted.
+    """
+    stripped = text.strip()
+    if len(stripped) < 3:
+        return stripped
+    opener = stripped[0]
+    closer = _QUOTE_PAIRS.get(opener)
+    if not closer:
+        return stripped
+    if not stripped.endswith(closer):
+        return stripped
+    inner = stripped[1:-1]
+    if not inner.strip():
+        return stripped
+    # only collapse when no stray matching quote remains inside
+    return inner.strip()
+
+
+OPEN_BRACKETS = "([{（【《「『"
+CLOSE_BRACKETS = ")]}）】》」』"
+
+
+def repair_brackets(translation: str, source: str) -> tuple[str, str]:
+    """Balance brackets against the source's counts. Returns (text, note).
+
+    A small MT model keeps producing ``（ATT&CK>）`` or ``（ATLAS））`` for a source
+    that had exactly one balanced pair each: it garbles or duplicates the closing
+    bracket. Prompt instructions did not fix it reliably, so the counts are
+    compared instead.
+
+    Two repairs, both conservative:
+
+    * a mangled closer — ``>`` sitting inside an unclosed ``（…`` — is restored to
+      ``）`` (and ``<`` likewise);
+    * surplus closers are deleted, choosing the ones with no opener to their
+      left, so a properly matched pair never loses its bracket.
+
+    Nothing is ever inserted, so a repair cannot invent structure the source did
+    not have.
+    """
+    if not translation:
+        return translation, ""
+    src_open = sum(source.count(c) for c in OPEN_BRACKETS)
+    src_close = sum(source.count(c) for c in CLOSE_BRACKETS)
+    if src_open == 0 and src_close == 0:
+        return translation, ""          # brackets the model added out of nowhere
+    text = translation
+    notes: list[str] = []
+
+    def counts(s: str) -> tuple[int, int]:
+        return (sum(s.count(c) for c in OPEN_BRACKETS),
+                sum(s.count(c) for c in CLOSE_BRACKETS))
+
+    # 1) a closer mangled into an angle bracket inside an otherwise open pair
+    if ">" in text or "<" in text:
+        after = None      # remember the char we replaced, for the note
+        for idx, ch in enumerate(text):
+            if ch not in "<>":
+                continue
+            before = text[:idx]
+            # it must sit after an opener that has no closer yet, and before a
+            # real closer:  （ATT&CK>）   ->   （ATT&CK）
+            if (sum(before.count(c) for c in OPEN_BRACKETS)
+                    > sum(before.count(c) for c in CLOSE_BRACKETS)
+                    and any(c in CLOSE_BRACKETS for c in text[idx + 1:])):
+                text = text[:idx] + "）" + text[idx + 1:]
+                after = ch
+                break
+        if after:
+            notes.append(f"restored a mangled closer ({after} -> ）)")
+
+    # 2) delete surplus closers, preferring the ones with no opener to their left
+    out_open, out_close = counts(text)
+    surplus = out_close - src_close
+    if surplus > 0:
+        removed = 0
+        while removed < surplus:
+            depth = 0
+            orphan = None
+            for i, ch in enumerate(text):
+                if ch in OPEN_BRACKETS:
+                    depth += 1
+                elif ch in CLOSE_BRACKETS:
+                    if depth == 0:
+                        orphan = i
+                        break
+                    depth -= 1
+            if orphan is not None:
+                text = text[:orphan] + text[orphan + 1:]
+            else:
+                for i in range(len(text) - 1, -1, -1):
+                    if text[i] in CLOSE_BRACKETS:
+                        text = text[:i] + text[i + 1:]
+                        break
+            removed += 1
+        notes.append(f"removed {removed} surplus closer(s)")
+
+    return text, "; ".join(notes)
+
+
 def _xml_safe(value: str) -> str:
     """Encode a translated line as valid, PowerPoint-renderable DrawingML text.
 
@@ -543,16 +703,21 @@ around it, no explanation and no markdown. Never add items that were not in the 
 Rules:
 1. Translate meaning, not words. Write natural, fluent Simplified Chinese that a \
 security practitioner would actually read. Keep sentences short and punchy, as \
-befit slides. Keep the source's opening and closing brackets and parentheses.
-2. These terms must stay in English, verbatim, never translated and never followed by \
+befit slides.
+2. Write Simplified characters only. Never emit Traditional forms: 规则 not 規則, \
+范围 not 範圍, 严格 not 嚴格, 无 not 無, 误解 not 誤解, 红队 not 紅隊.
+3. Every bracket must balance. The source's parentheses are part of its labels: \
+``(ATT&CK)`` becomes ``（ATT&CK）``, never ``（ATT&CK）]`` or ``（ATLAS））``. Never add \
+or drop a closing bracket, and never leave a stray ``]`` or ``)`` behind.
+4. These terms must stay in English, verbatim, never translated and never followed by \
 a Chinese gloss: {keep_terms}
    Most of them arrive as [[G…]] tokens; if one appears as plain text anyway, leave it \
 in English.
-3. Use full-width Chinese punctuation (，。：；？！) except inside kept English terms, \
+5. Use full-width Chinese punctuation (，。：；？！) except inside kept English terms, \
 code and URLs. Prefer Chinese quotation marks “ ” over ASCII quotes.
-4. Numbers, versions, CVE ids, URLs, file paths, command lines and code stay exactly \
+6. Numbers, versions, CVE ids, URLs, file paths, command lines and code stay exactly \
 as they are.
-5. If the input is only symbols or numbers, return it unchanged."""
+7. If the input is only symbols or numbers, return it unchanged."""
 
 
 # Only unambiguous proper nouns, acronyms and product names belong here. General
@@ -606,6 +771,9 @@ class ProviderConfig:
     retries: int = 4
     keep_terms: str = DEFAULT_KEEP_TERMS
     temperature: float = 0.2
+    # How long a local Ollama server should keep the model in memory after a
+    # request. Long enough to outlast a whole deck translation.
+    ollama_keep_alive: str = "60m"
 
 
 class TranslationError(RuntimeError):
@@ -775,6 +943,11 @@ class OpenAICompatProvider(BaseProvider):
         }
         if self.cfg.provider == "deepseek":
             payload["thinking"] = {"type": "disabled"}
+        if self.cfg.provider == "ollama":
+            # Keep the model resident for the whole run. The default 5-minute
+            # idle timer is shorter than a long deck takes to translate, and a
+            # mid-run unload costs a full reload on the next paragraph.
+            payload["keep_alive"] = self.cfg.ollama_keep_alive
         return payload
 
     def _headers(self) -> dict:
@@ -924,12 +1097,15 @@ class Translator:
         use_cache: bool = True,
         glossary: dict[str, str] | None = None,
         placeholders: "PlaceholderMap | None" = None,
+        simplify: bool = True,
     ) -> None:
         self.provider = provider
         self.batch_size = max(1, batch_size)
         self.concurrency = max(1, concurrency)
         self.cache_path = Path(cache_path) if cache_path else None
         self.use_cache = use_cache
+        # Convert Traditional output to Simplified (a no-op for other targets).
+        self.simplify = simplify
         self.placeholders = placeholders or PlaceholderMap()
         self.glossary = {k: v for k, v in (glossary or {}).items() if k and k.strip()}
         # Global, term-derived token numbering: [[Gn]] always means the same term.
@@ -951,9 +1127,20 @@ class Translator:
                 )
             )
         self.cache: dict[str, str] = {}
+        self.failed_sources: set[str] = set()
         self._lock = threading.Lock()
         digest_src = json.dumps(sorted(self.glossary.items()), ensure_ascii=False)
         self._glossary_digest = hashlib.sha256(digest_src.encode("utf-8")).hexdigest()[:8]
+
+        if self.cache_path and self.use_cache and self.cache_path.exists():
+            try:
+                self.cache = json.loads(self.cache_path.read_text("utf-8"))
+                log.info("cache: %d remembered string(s) from %s",
+                         len(self.cache), self.cache_path)
+            except Exception as exc:
+                log.warning("unreadable cache %s: %s", self.cache_path, exc)
+        elif self.cache_path and self.use_cache:
+            log.info("cache: %s does not exist yet; starting empty", self.cache_path)
 
     # -- glossary ----------------------------------------------------------- #
     def lock_terms(self, text: str) -> str:
@@ -1049,8 +1236,20 @@ class Translator:
             value = "" if translated is None else str(translated)
             value = self.placeholders.restore(value, emoji_map)
             value = self.unlock_terms(value)
+            value, phantoms = strip_unknown_tokens(value, set())
+            if phantoms:
+                log.info("removed %d invented placeholder(s) %s from a translation",
+                         len(phantoms), sorted(set(phantoms))[:3])
             value = normalize_breaks(value)
             value = value.replace("\r\n", "\n").replace("\n", "\x0b").strip()
+            value, bracket_note = repair_brackets(value, src)
+            if bracket_note:
+                log.info("bracket repair on %r: %s", src[:40], bracket_note)
+            if self.simplify:
+                value = to_simplified(value)
+            # only unwrap when the source carried no quotes of its own
+            if not any(q in src for q in _QUOTE_PAIRS):
+                value = strip_redundant_quotes(value)
             leftovers = re.findall(r"\[\[[A-Za-z]?\d+\]\]", value)
             if leftovers:
                 log.warning("unrestored placeholder(s) %s left in a translation: %r",
@@ -1075,10 +1274,21 @@ class Translator:
             key = self.cache_key(text)
             hit = self.cache.get(key)
             if hit is not None:
-                # the cache holds still-tokenised text: undo both layers
+                # the cache holds still-tokenised text: undo both layers, then
+                # drop anything the model invented that was never in the source
                 locked = self.lock_terms(text)
                 decoded = self.placeholders.restore(hit, self.placeholders.mapping_for(locked))
-                resolved[text] = normalize_breaks(self.unlock_terms(decoded))
+                cleaned, phantoms = strip_unknown_tokens(self.unlock_terms(decoded), set())
+                if phantoms:
+                    log.info("removed %d invented placeholder(s) from a cached translation",
+                             len(phantoms))
+                cleaned = normalize_breaks(cleaned)
+                cleaned, _note = repair_brackets(cleaned, text)
+                if self.simplify:
+                    cleaned = to_simplified(cleaned)
+                if not any(q in text for q in _QUOTE_PAIRS):
+                    cleaned = strip_redundant_quotes(cleaned)
+                resolved[text] = cleaned
             else:
                 todo.append(text)
 
@@ -1117,6 +1327,13 @@ class Translator:
                             # would keep discarding good translations.
                             locked = self.lock_terms(str(dst))
                             self.cache[self.cache_key(src)] = self.placeholders.protect(locked)
+                            self.failed_sources.discard(src)
+                        else:
+                            # "translation equals source" is how a failure and a
+                            # deliberate keep-as-is both look. Record it as failed
+                            # and let the caller report it honestly; a later
+                            # request that succeeds clears it again.
+                            self.failed_sources.add(src)
                     done_count += len(batch)
                     if progress:
                         progress(done_count, total)

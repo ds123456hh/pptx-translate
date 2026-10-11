@@ -345,7 +345,12 @@ def main(argv: list[str] | None = None) -> int:
         "chart_parts": len(buckets),
         "pictures": len(insp.media),
         "provider": args.provider,
-        "model": args.model or (DEFAULT_MODEL if args.provider != "mock" else "mock"),
+        # the real model, not the --model default: for local backends the model
+        # name comes from --ollama-model / --local-model
+        "model": (args.ollama_model if args.provider == "ollama"
+                  else args.local_model or core.DEFAULT_LOCAL_MODEL if args.provider == "local"
+                  else "mock" if args.provider == "mock"
+                  else args.model or DEFAULT_MODEL),
     }
 
     if args.dry_run:
@@ -464,7 +469,10 @@ def main(argv: list[str] | None = None) -> int:
                 log.info("progress: %d/%d strings (%.0f%%)", done, total, 100.0 * done / total)
 
         resolved = translator.translate_texts(sources, progress=progress)
-        missing = [s for s in set(sources) if s not in resolved or resolved.get(s) == s]
+        # Report only genuine failures. A string whose translation equals its
+        # source is either a real failure or a deliberate keep-as-is (an acronym
+        # the glossary pins), so it is never counted as missing on that basis.
+        missing = sorted(translator.failed_sources)
         failures = sorted(set(getattr(provider, "failed_items", [])))
         if missing:
             log.warning("%d string(s) were not translated and stay in English", len(missing))

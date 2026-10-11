@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Full Chinese-script coverage: OpenCC converts any Traditional characters a
+# model emits into Simplified. Without it, a small built-in table covers the
+# handful of characters these models actually produce.
+zh = [
+    "opencc-python-reimplemented>=0.1.7",
+]
 # In-process translation with a local HuggingFace model (no API key, no cost).
 local = [
     "torch>=2.2",
