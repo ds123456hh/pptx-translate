@@ -42,4 +42,4 @@ media and animations survive byte-for-byte.
 - Unit tests covering the run/paragraph/soft-break round-trip, chart parts,
   glossary tokens, placeholder protection and cache semantics.
 
-[1.0.0]: https://github.com/OWNER/pptx-translate/releases/tag/v1.0.0
+[1.0.0]: https://github.com/YOUR-GITHUB-USERNAME/pptx-translate/releases/tag/v1.0.0

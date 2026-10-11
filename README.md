@@ -37,7 +37,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/OWNER/pptx-translate.git
+git clone https://github.com/YOUR-GITHUB-USERNAME/pptx-translate.git
 cd pptx-translate
 pip install -e .
 ```
