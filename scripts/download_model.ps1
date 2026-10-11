@@ -2,10 +2,9 @@
 <#
     Step 2a: download the Hy-MT2 1.8B Q4_K_M GGUF into D:\AI-tools\Models.
 
-    Order of attempts (the user asked for automatic mirror fallback):
+    Order of attempts (mirror fallback, as requested):
       1. hf-mirror.com   (fast in China)
       2. huggingface.co  (direct)
-      3. modelscope.cn   (tencent mirror, different repository layout)
     Resumable: a partial download continues instead of restarting.
 #>
 param(
