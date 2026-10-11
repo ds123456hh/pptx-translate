@@ -1,6 +1,7 @@
 # ---- secrets / credentials -------------------------------------------------
 .env
 .env.*
+!.env.example
 *.key
 credentials.json
 .cache/
