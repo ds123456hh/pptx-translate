@@ -63,6 +63,34 @@ def resolve_api_key(explicit: str | None) -> tuple[str | None, str | None]:
 # --------------------------------------------------------------------------- #
 # argument parsing
 # --------------------------------------------------------------------------- #
+def _safe_print(text: str) -> None:
+    """Print text that may contain emoji, on a console that cannot encode it.
+
+    A Windows console defaults to a legacy code page (GBK here), and printing a
+    preview containing an emoji raises UnicodeEncodeError and kills the command
+    after the work is already done. Fall back to UTF-8 bytes on the underlying
+    buffer, and only drop characters as a last resort.
+    """
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    try:
+        buffer = getattr(sys.stdout, "buffer", None)
+        if buffer is not None:
+            buffer.write(text.encode("utf-8", "replace"))
+            buffer.write(b"\n")
+            buffer.flush()
+            return
+    except Exception:
+        pass
+    try:
+        print(text.encode("ascii", "replace").decode("ascii"))
+    except Exception:
+        pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pptx_translate",
@@ -361,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
         report["mode"] = "dry-run"
         report["preview"] = preview
         _write_report(args.report or _sidecar(out, ".report.json"), report)
-        print(json.dumps(report, ensure_ascii=False, indent=2)[:6000])
+        _safe_print(json.dumps(report, ensure_ascii=False, indent=2)[:6000])
         return 0
 
     # Resolve the endpoint first: whether a key is required depends on it.
@@ -536,7 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     report["elapsed_seconds"] = round(time.time() - started, 1)
 
     if not args.quiet:
-        print()
+        _safe_print("")
         log.info("input : %s (%.1f MB)", src, src.stat().st_size / 1048576)
         log.info("output: %s (%.1f MB)", out, out.stat().st_size / 1048576)
         log.info("slides %s | pictures %s | media parts %s | animations %s",
