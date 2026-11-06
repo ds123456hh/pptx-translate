@@ -106,16 +106,35 @@ def text_parts(text: str) -> list[str]:
     return [p for p in split_breaks(normalize_breaks(text)) if p not in BREAK_CHARS]
 
 
-def is_blank(text: str) -> bool:
-    """True when there is nothing worth sending to the model."""
+def is_blank(text: str, target_language: str = "Simplified Chinese") -> bool:
+    """Skip symbols and Chinese-led text, but retain English with Chinese notes.
+
+    A sentence containing ``(免疫力)`` is still an English sentence.  Chinese
+    explanations of English grammar, on the other hand, should stay intact.
+    The conservative 10% threshold separates both cases in ordinary slides;
+    callers can still override individual translations with ``--strings-json``.
+    """
     stripped = re.sub(r"[\s\u200b\ufeff\xa0]+", "", text)
     if not stripped:
         return True
     # pure punctuation / digits / symbols (e.g. "->", "2024", "#3")
-    if not re.search(r"[A-Za-z\u00c0-\u024f\u0400-\u04ff]", stripped):
+    if not any(ch.isalpha() for ch in stripped):
         return True
-    if LANG_CJK_RE.search(stripped):
-        return True  # already Chinese; nothing to do
+    if re.fullmatch(r"[A-Z]", stripped):
+        return True  # multiple-choice label, not a word to translate
+    if re.fullmatch(r"[A-Z]{2,}(?:[-_/][A-Z0-9]+)*[-_/]\d+(?:\.\d+)*", stripped):
+        return True  # identifier such as COVID-19 or CVE-2024
+    if "chinese" not in target_language.lower() and not any(
+        word in target_language for word in ("中文", "简体", "繁體")
+    ):
+        return False
+    if re.search(r"[\u3040-\u30ff\uac00-\ud7af]", stripped):
+        return False  # Japanese/Korean text can be translated into Chinese
+    without_glosses = re.sub(r"[（(][^()（）]*[\u3400-\u9fff][^()（）]*[)）]", "", stripped)
+    if LANG_CJK_RE.search(stripped) and not LANG_CJK_RE.search(without_glosses):
+        return False  # e.g. "retina (视网膜) scan"
+    if LANG_CJK_RE.search(stripped) and chinese_ratio(stripped) >= 0.10:
+        return True  # predominantly Chinese teaching notes / examples
     return False
 
 
@@ -124,6 +143,34 @@ def chinese_ratio(text: str) -> float:
     if not letters:
         return 0.0
     return sum(1 for c in letters if LANG_CJK_RE.match(c)) / len(letters)
+
+
+_LEADING_LABEL = re.compile(r"^(\s*)((?:\d{1,3}|[A-F])(?:[.)、．])?)\s+(?=\S)")
+
+
+def preserve_leading_label(source: str, translation: str) -> str:
+    """Restore a leading list label that a translation model omitted.
+
+    A model often drops a reading passage's initial ``2`` while translating
+    its prose.  The label is structural slide content, so keep it verbatim.
+    """
+    match = _LEADING_LABEL.match(source)
+    if not match:
+        return translation
+    label = match.group(2)
+    if re.match(r"^\s*" + re.escape(label) + r"(?:\s|[.)、．]|$)", translation):
+        return translation
+    return f"{match.group(1)}{label} {translation.lstrip()}"
+
+
+def restore_tabs(source: str, translation: str) -> str:
+    """Keep a source tab from becoming visible backslash-t text on the slide."""
+    if "\t" not in source:
+        return translation
+    translation = translation.replace("\\t", "\t")
+    if source.endswith("\t") and not translation.endswith("\t"):
+        translation += "\t"
+    return translation
 
 
 # --------------------------------------------------------------------------- #
@@ -248,10 +295,11 @@ class Inspection:
 # read side
 # --------------------------------------------------------------------------- #
 def _walk_shapes(shapes, slide_no: int, where: str, sink: Callable):
-    """Recursively visit shapes, including group members."""
+    """Recursively visit shapes using IDs, not potentially repeated names."""
     for shape in shapes:
+        label = f"{shape.shape_id}:{shape.name}"
         if getattr(shape, "has_group", False):
-            _walk_shapes(shape.shapes, slide_no, f"{where}/{shape.name}", sink)
+            _walk_shapes(shape.shapes, slide_no, f"{where}/{label}", sink)
             continue
         sink(shape, slide_no, where)
 
@@ -519,13 +567,13 @@ def _xml_safe(value: str) -> str:
       part marginally non-conformant, so soft breaks are emitted as the escape;
     * lxml refuses C0 control characters, so a stray one must not reach the tree.
 
-    Whitespace-and-structure characters that legacy decks really do use — tab
-    (``_x0009_``) and carriage return (``_x000D_``) — are escaped the same way.
+    Carriage returns are escaped. XML permits ordinary tab characters, and
+    PowerPoint renders ``_x0009_`` literally in some text boxes, so keep tabs.
     """
     value = value.replace("\x0b", VB_ESCAPE)
-    value = value.replace("\t", "_x0009_").replace("\r", "_x000D_")
+    value = value.replace("\r", "_x000D_")
     return "".join(
-        ch if ch in "\n" or ord(ch) >= 0x20 else " " for ch in value
+        ch if ch in "\n\t" or ord(ch) >= 0x20 else " " for ch in value
     )
 
 
@@ -684,8 +732,7 @@ def apply_units_to_frame(tf, by_index: dict[int, str]) -> bool:
 # --------------------------------------------------------------------------- #
 # providers
 # --------------------------------------------------------------------------- #
-SYSTEM_PROMPT = """You are a professional technical translator localising cybersecurity \
-training slide decks from English into {target_language}.
+SYSTEM_PROMPT = """You translate presentation text into {target_language}.
 
 You receive ONE slide paragraph at a time. It may contain:
 - EMOJI TOKENS such as [[E1]] or [[E12]]: these stand for emoji. Copy every token \
@@ -701,30 +748,23 @@ OUTPUT: only the translated paragraph, on its own, with no numbering, no quotes 
 around it, no explanation and no markdown. Never add items that were not in the input.
 
 Rules:
-1. Translate meaning, not words. Write natural, fluent Simplified Chinese that a \
-security practitioner would actually read. Keep sentences short and punchy, as \
-befit slides.
-2. Write Simplified characters only. Never emit Traditional forms: 规则 not 規則, \
-范围 not 範圍, 严格 not 嚴格, 无 not 無, 误解 not 誤解, 红队 not 紅隊.
-3. Every bracket must balance. The source's parentheses are part of its labels: \
-``(ATT&CK)`` becomes ``（ATT&CK）``, never ``（ATT&CK）]`` or ``（ATLAS））``. Never add \
-or drop a closing bracket, and never leave a stray ``]`` or ``)`` behind.
-4. These terms must stay in English, verbatim, never translated and never followed by \
-a Chinese gloss: {keep_terms}
-   Most of them arrive as [[G…]] tokens; if one appears as plain text anyway, leave it \
-in English.
-5. Use full-width Chinese punctuation (，。：；？！) except inside kept English terms, \
-code and URLs. Prefer Chinese quotation marks “ ” over ASCII quotes.
-6. Numbers, versions, CVE ids, URLs, file paths, command lines and code stay exactly \
-as they are.
-7. If the input is only symbols or numbers, return it unchanged."""
+1. Translate the complete meaning without adding facts, examples, acronyms or \
+labels that are absent from the source. Use natural wording suited to a slide.
+2. If the target is Simplified Chinese, use Simplified characters and Chinese \
+punctuation. Preserve terms embedded in code, URLs and file paths.
+3. Preserve the source's numbers, units, leading item numbers and choice labels. \
+Keep every bracket balanced and do not invent brackets.
+4. Preserve Chinese parenthetical explanations that are already present in an \
+otherwise English sentence; translate the surrounding English.
+5. {term_rule}
+6. If the input is only symbols or numbers, return it unchanged."""
 
 
 # Only unambiguous proper nouns, acronyms and product names belong here. General
 # concepts are deliberately absent: "penetration testing", "red teaming" and
 # "token" all have natural Chinese renderings, and forcing them to English makes
 # a sentence read worse rather than better.
-DEFAULT_GLOSSARY = {
+CYBERSECURITY_GLOSSARY = {
     "LLM": "LLM",
     "LLMs": "LLMs",
     "GPT": "GPT",
@@ -750,10 +790,14 @@ DEFAULT_GLOSSARY = {
     "SDK": "SDK",
 }
 
-DEFAULT_KEEP_TERMS = (
+CYBERSECURITY_KEEP_TERMS = (
     "LLM, LLMs, GPT, RAG, MITRE ATT&CK, ATT&CK, ATLAS, OWASP, NIST, CVE, CWE, "
     "TTP, TTPs, Shodan, Burp Suite, Metasploit, Nmap, Wireshark, API, SDK"
 )
+
+# A general-purpose deck must not inherit terms from an unrelated subject.
+DEFAULT_GLOSSARY: dict[str, str] = {}
+DEFAULT_KEEP_TERMS = ""
 
 # The local provider's default checkpoint, re-exported so the CLI can advertise
 # it without importing torch (only ``local`` needs the heavy dependencies).
@@ -772,8 +816,10 @@ class ProviderConfig:
     keep_terms: str = DEFAULT_KEEP_TERMS
     temperature: float = 0.2
     # How long a local Ollama server should keep the model in memory after a
-    # request. Long enough to outlast a whole deck translation.
-    ollama_keep_alive: str = "60m"
+    # request. Ollama's own default is 5 minutes; this covers back-to-back runs
+    # without pinning the model in VRAM (and holding it against any other model)
+    # after you walk away.
+    ollama_keep_alive: str = "10m"
 
 
 class TranslationError(RuntimeError):
@@ -787,9 +833,12 @@ class BaseProvider:
         self.cfg = cfg
         self.failed_items: list[str] = []
         self.lost_placeholders: list[str] = []
+        term_rule = ("Keep only these user-selected terms verbatim: " + cfg.keep_terms
+                     if cfg.keep_terms.strip() else
+                     "Translate ordinary words; retain proper names only when appropriate.")
         self.system = SYSTEM_PROMPT.format(
             target_language=cfg.target_language,
-            keep_terms=cfg.keep_terms,
+            term_rule=term_rule,
         )
 
     def translate(self, items: Sequence[str]) -> list[str]:  # pragma: no cover
@@ -1129,7 +1178,14 @@ class Translator:
         self.cache: dict[str, str] = {}
         self.failed_sources: set[str] = set()
         self._lock = threading.Lock()
-        digest_src = json.dumps(sorted(self.glossary.items()), ensure_ascii=False)
+        # Old cached replies came from a cybersecurity-specific prompt.  Include
+        # the current prompt and target in the cache namespace so they cannot
+        # silently contaminate another subject or language.
+        digest_src = json.dumps(
+            [sorted(self.glossary.items()), provider.system,
+             provider.cfg.target_language, provider.cfg.keep_terms],
+            ensure_ascii=False,
+        )
         self._glossary_digest = hashlib.sha256(digest_src.encode("utf-8")).hexdigest()[:8]
 
         if self.cache_path and self.use_cache and self.cache_path.exists():
@@ -1250,6 +1306,8 @@ class Translator:
             # only unwrap when the source carried no quotes of its own
             if not any(q in src for q in _QUOTE_PAIRS):
                 value = strip_redundant_quotes(value)
+            value = preserve_leading_label(src, value)
+            value = restore_tabs(src, value)
             leftovers = re.findall(r"\[\[[A-Za-z]?\d+\]\]", value)
             if leftovers:
                 log.warning("unrestored placeholder(s) %s left in a translation: %r",
@@ -1288,6 +1346,8 @@ class Translator:
                     cleaned = to_simplified(cleaned)
                 if not any(q in text for q in _QUOTE_PAIRS):
                     cleaned = strip_redundant_quotes(cleaned)
+                cleaned = preserve_leading_label(text, cleaned)
+                cleaned = restore_tabs(text, cleaned)
                 resolved[text] = cleaned
             else:
                 todo.append(text)
@@ -1366,7 +1426,7 @@ def flatten(prs) -> Inspection:
         insp.units.append(unit)
 
     def sink(shape, slide_no: int, where: str) -> None:
-        label = f"{where}/{shape.name}"
+        label = f"{where}/{shape.shape_id}:{shape.name}"
         if shape.has_text_frame:
             bucket: list[Unit] = []
             _collect_text_frame(shape.text_frame, slide_no, label, "shape", bucket)

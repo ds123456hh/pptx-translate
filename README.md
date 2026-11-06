@@ -1,6 +1,6 @@
 # pptx-translate
 
-把一个 `.pptx` 的**文字**翻译成中文（或任何语言），产出一份新的 PPT——**排版、字体、颜色、项目符号、图片、动画一律不动**。
+把 `.pptx` / `.pptm` 中的**可编辑文字**翻译成中文（也可指定其他目标语言），保留形状、字体、颜色、项目符号、图片和动画。文字换语言后仍需查看换行与密集表格；图片中的字需要单独重制。
 
 ```
 输入 deck.pptx  ──►  就地替换文字节点  ──►  deck.zh-CN.pptx
@@ -47,6 +47,8 @@ pip install -e .
 ```bash
 pip install -e ".[local]"      # 加装 torch(CPU) + transformers + huggingface_hub
 ```
+
+Windows 上安装了 PowerPoint 时，建议另装 `pip install -e ".[windows]"`。工具会读取原稿中自动行高表格的实际行高，避免翻译后表格边框移动；其他系统会在报告中标记这类表格供复核。
 
 ---
 
@@ -128,9 +130,12 @@ pptx-translate deck.pptx --provider mock              # 不联网，验证全流
 | `--base-url` / `--model` | — | 远程接口地址与模型名 |
 | `--batch-size` | `1` | 见下文「为什么默认一次只翻一段」 |
 | `--concurrency` | `6` | 并发请求数（本地 provider 自动降为 1） |
-| `--glossary` | 内置 23 个专有名词 | 强制锁定的术语（JSON 或 `源,译` 每行） |
+| `--glossary` | 无 | 强制锁定的自定义术语（JSON 或 `源,译` 每行） |
+| `--glossary-profile` | `none` | `cybersecurity` 可启用原有网络安全术语表 |
+| `--keep-terms` | 无 | 额外要求模型保留的英文术语 |
 | `--autofit` | `off` | `off` / `no-titles` / `all`，中文变长时是否缩字号 |
 | `--autofit-preview` | 关 | 只报告会溢出的框，不改字号 |
+| `--table-layout` | `auto` | 有 PowerPoint 与 pywin32 时固定原稿自动行高；`off` 仅报告风险 |
 | `--notes` | 关 | 同时翻译演讲者备注 |
 | `--cache` / `--no-cache` | `<输出>.cache.json` | 翻译记忆，失败不写入，可断点续跑 |
 
@@ -145,13 +150,15 @@ pptx-translate deck.pptx --provider mock              # 不联网，验证全流
 占位符编号是**全局稳定**的（由术语本身决定，不是按段落位置），否则同一个 `[[G9]]` 在不同段落会代表不同词，还原出来就是错的词。模型可能把 `[[G9]]` 改写成 `[[G9 ]]` 或漏掉一个括号，还原逻辑对此容错。
 
 ```bash
-# 想让 "prompt injection" 统一译成中文？覆盖内置表即可
+# 只锁定这份课件所需的术语
 printf 'prompt injection,提示注入\nLLM,大语言模型\n' > glossary.csv
 pptx-translate deck.pptx --glossary glossary.csv
+
+# 翻译旧的网络安全课件时，显式启用原有术语表
+pptx-translate security.pptx --glossary-profile cybersecurity
 ```
 
-内置表只收录**真正该保留英文的专有名词与缩写**（LLM、OWASP、MITRE ATT&CK、CVE…）。
-像 `token`、`agent`、`prompt`、`penetration testing` 这类已有通用中文译法的词**故意不收**——强行留英文只会让句子更难读。
+默认没有学科术语表，医学、工程和商业课件不会带入网络安全词汇。原有网络安全专名表仍可按需启用。缓存键包含提示词、目标语言和术语设置，旧模型回复不会污染另一类课件。
 
 ---
 
@@ -169,16 +176,17 @@ pptx-translate deck.pptx --glossary glossary.csv
 
 ## 已知边界
 
-- **图片里的文字翻不了**（截图、导出的图）。报告会列出面积较大的图片及页码，方便人工补。
+- **图片里的文字不会翻译**（截图、导出的图）。报告的 `image_text_review` 按图片面积列出候选页；它不是 OCR 结果。
 - **嵌入的 OLE 对象**（`ppt/embeddings/*.xlsx`）不翻译。
 - 只支持 `.pptx` / `.pptm`；老的 `.ppt` 请先另存为 pptx。
-- 译文由模型生成，安全术语建议人工抽检。
+- 译文由模型生成；报告的 `quality_warnings` 会标出新增英文术语、丢失的数字、异常短译文等，但人工审校仍然必要。
+- 自动行高表格在未安装 PowerPoint/pywin32 的环境中可能改变视觉行高；查看报告的 `table_layout.unresolved`。
 
 ---
 
 ## 校验
 
-每次运行都会写一份报告 `<输出>.report.json`，含页数、段落数、翻译覆盖率、未翻译字符串清单与结构校验结果。
+每次运行都会写一份报告 `<输出>.report.json`，含页数、翻译覆盖率、质量提示、图片复核候选、表格行高状态与结构校验。只把改过的幻灯片、备注和图表 XML 写回原始包，其余部件（包括媒体和宏部件）保留原始字节。
 
 更严格的逐形状比对：
 
@@ -190,7 +198,7 @@ python scripts/verify_pptx.py 原文件.pptx 译后文件.pptx
 单元测试（不需要网络、不需要模型）：
 
 ```bash
-python tests/test_roundtrip.py     # 17 项
+python tests/test_roundtrip.py     # 26 项
 ```
 
 ---
@@ -203,6 +211,8 @@ pptx_translate/
   core.py         提取/写回、占位符、术语锁定、翻译器、HTTP provider
   local.py        进程内 HuggingFace provider（可选，需 torch）
   fit.py          溢出检测与保守缩放
+  quality.py      译文异常检查
+  table_layout.py 自动行高表格的原稿测量与固定
 tests/
   test_roundtrip.py
 scripts/

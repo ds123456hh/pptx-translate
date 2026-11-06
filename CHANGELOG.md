@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-06
+
+### Changed
+
+- General-purpose translation prompt and empty default glossary; the original
+  cybersecurity terms remain available with `--glossary-profile cybersecurity`.
+- English paragraphs with short Chinese glosses are translated; Chinese-led
+  teaching notes and multiple-choice labels are skipped.
+- Translation memory keys include the prompt, target language and term settings.
+- Output copies the original PPTX/PPTM package and replaces only edited XML,
+  preserving all unrelated package parts byte-for-byte.
+
+### Added
+
+- Quality warnings for missing numbers or list labels, invented Latin terms,
+  unresolved markers and suspiciously short translations. Leading list labels
+  are restored automatically.
+- Optional PowerPoint measurement of source automatic table row heights on
+  Windows (`pip install -e ".[windows]"`), plus a portability warning when
+  those rows cannot be stabilized.
+- SHA-256 media comparison and broader grouped/table-text verification.
+
+### Fixed
+
+- Shape IDs now distinguish text boxes that share a display name, preventing
+  one translated paragraph from overwriting another.
+- Source tabs remain real tabs in PowerPoint instead of rendering as the
+  literal `_x0009_` escape.
+- Table auto-fit preview no longer tries to read unavailable cell width/height
+  attributes, and wrapped lines are counted across manual line breaks.
+
+
 ## [1.0.0] - 2025
 
 First release. The engine rewrites text nodes in place, so layout, styles,

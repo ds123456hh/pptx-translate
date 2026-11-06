@@ -368,7 +368,107 @@ def test_blank_detection():
     assert not core.is_blank("Prompt Injection")
     assert not core.is_blank("🔍 What is it?")
     assert not core.is_blank("North")
+    assert not core.is_blank("Most people with healthy immunity (免疫力) are not easily affected.")
+    assert not core.is_blank("Go (开始)")
+    assert core.is_blank("此句中的 provided that 引导条件状语从句，意为只要。")
+    assert core.is_blank("A")
+    assert core.is_blank("COVID-19")
+    assert not core.is_blank("これは日本語です")
+    assert not core.is_blank("已经是中文了", "French")
     print("blank detection         OK")
+
+
+def test_general_prompt_and_cache_namespace():
+    """An unrelated deck must not inherit security examples or old replies."""
+    from pptx_translate import cli
+
+    cfg = core.ProviderConfig(provider="mock", model="same-model")
+    provider = core.MockProvider(cfg)
+    assert "ATT&CK" not in provider.system
+    assert "cybersecurity" not in provider.system
+    assert core.DEFAULT_GLOSSARY == {}
+    assert cli.build_parser().parse_args(["deck.pptx"]).glossary_profile == "none"
+    tr = core.Translator(provider, glossary={})
+    other = core.Translator(core.MockProvider(core.ProviderConfig(
+        provider="mock", model="same-model", target_language="French")), glossary={})
+    assert tr.cache_key("Source") != other.cache_key("Source")
+    print("general prompt/cache     OK")
+
+
+def test_quality_flags_invented_terms_and_missing_figures():
+    from pptx_translate.quality import issues_for
+
+    bad = issues_for("2 The material is 200 times stronger than steel.",
+                     "（ATT&CK）这种材料比钢更强。", "Simplified Chinese")
+    assert "leading_label_missing" in bad
+    assert "numbers_missing" in bad
+    assert "latin_term_added" in bad
+    assert not issues_for("2 The material is 200 times stronger than steel.",
+                          "2 这种材料的强度是钢的200倍。", "Simplified Chinese")
+    assert core.preserve_leading_label("2 Around the world", "遍布世界") == "2 遍布世界"
+    assert core.preserve_leading_label("2 Around the world", "2 遍布世界") == "2 遍布世界"
+    assert core.restore_tabs("Para. 1\t", "第1段\\t") == "第1段\t"
+    assert core._xml_safe("第1段\t") == "第1段\t"
+    print("quality audit            OK")
+
+
+def test_dynamic_table_rows_and_fit_preview():
+    from pptx import Presentation
+    from pptx.util import Inches
+    from pptx_translate import fit, table_layout
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_table(2, 1, Inches(1), Inches(1), Inches(4), Inches(2))
+    shape.table.rows[0].height = 0
+    shape.table.rows[1].height = 0
+    shape.height = Inches(2)  # OOXML frame stays fixed even when rows are auto
+    shape.table.cell(0, 0).text = "A paragraph with enough content to check the cell path."
+    auto = table_layout.dynamic_tables(prs)
+    assert len(auto) == 1 and auto[0]["auto_rows"] == [1, 2]
+    stats = fit.shrink_to_fit(prs, dry_run=True)
+    assert stats["unknown_table_rows"] == 1
+    changed = table_layout.apply_row_heights(prs, {(1, shape.shape_id): [36.0, 108.0]})
+    assert changed == 1
+    assert sum(row.height for row in shape.table.rows) == shape.height
+    assert not table_layout.dynamic_tables(prs)
+    print("dynamic table layout     OK")
+
+
+def test_cli_preserves_unedited_package_parts():
+    """An extension part survives because output is based on the original ZIP."""
+    import tempfile
+    import zipfile
+    from pathlib import Path
+    from pptx import Presentation
+    from pptx_translate import cli
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        source, output = root / "input.pptx", root / "output.pptx"
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        first = slide.shapes.add_textbox(0, 0, 1000000, 200000)
+        second = slide.shapes.add_textbox(0, 300000, 1000000, 200000)
+        first.name = second.name = "Repeated name"
+        first.text = "Hello world"
+        second.text = "Different sentence"
+        prs.save(str(source))
+        with zipfile.ZipFile(source, "a") as package:
+            package.writestr("ppt/embeddings/keep.bin", b"extension-payload\x00\xff")
+        assert cli.main([str(source), "-o", str(output), "--provider", "mock",
+                         "--no-cache", "--table-layout", "off",
+                         "--report", str(root / "report.json"), "--quiet"]) == 0
+        with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
+            assert before.namelist() == after.namelist()
+            assert before.read("ppt/embeddings/keep.bin") == after.read("ppt/embeddings/keep.bin")
+            assert before.read("ppt/presentation.xml") == after.read("ppt/presentation.xml")
+            assert b"Hello world" in before.read("ppt/slides/slide1.xml")
+            assert b"Hello world" in after.read("ppt/slides/slide1.xml")
+        translated = Presentation(str(output))
+        assert translated.slides[0].shapes[0].text == "【Hello world】"
+        assert translated.slides[0].shapes[1].text == "【Different sentence】"
+    print("package extensions       OK")
 
 
 def test_placeholder_preservation():

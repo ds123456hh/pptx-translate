@@ -92,13 +92,15 @@ python -m pptx_translate deck.pptx --provider mock
 | `--batch-size` | `1` | 每次请求多少段。**默认 1**，原因见第 5 节 |
 | `--concurrency` | `6` | 并发请求数 |
 | `--timeout` / `--retries` | `120` / `4` | 单请求超时 / 单条重试次数 |
-| `--keep-terms` | 内置术语表 | 提示词里要求保留英文的术语，逗号分隔 |
-| `--glossary` | 内置 24 个专有名词 | 强制锁定的术语表（JSON 对象或 `源,译` 每行），会覆盖内置项 |
+| `--keep-terms` | 无 | 提示词里要求保留英文的术语，逗号分隔 |
+| `--glossary` | 无 | 强制锁定的自定义术语表（JSON 对象或 `源,译` 每行） |
+| `--glossary-profile` | `none` | `cybersecurity` 启用原有网络安全专名表 |
 | `--no-glossary` | 关 | 不锁定任何术语 |
 | `--strings-json` | 无 | 预翻译映射，给出后完全不调 API |
 | `--cache` / `--no-cache` | `<输出>.cache.json` | 翻译记忆，中断可续跑 |
 | `--autofit` | `off` | `off` / `no-titles` / `all` |
 | `--autofit-preview` | 关 | 只报告会溢出的框，不改字号 |
+| `--table-layout` | `auto` | Windows + PowerPoint + pywin32 时固定源表格自动行高；`off` 只报告 |
 | `--notes` | 关 | 同时翻译备注（默认不翻） |
 | `--dry-run` | 关 | 只列清单 |
 | `--report` | `<输出>.report.json` | 报告路径 |
@@ -133,15 +135,18 @@ python -m pptx_translate deck.pptx --autofit no-titles    # 再决定缩小（�
 
 - 只缩小**固定尺寸**文本框里的显式字号，最少到原字号的 70%；
 - 设置为「随文字调整形状」或「溢出时缩排文字」的框交给 PowerPoint 自己处理，不重复干预；
-- 表格单元格可缩，但**不改行高列宽**（改表格几何就是改排版）。
+- 表格单元格可缩。`--autofit` 本身不改行高列宽；`--table-layout auto` 可把原稿中由 PowerPoint 自动计算的行高写成固定值，以免翻译后边框移动。
 
 ## 5. 译文质量与"为什么默认一次只翻一段"
 
-- 系统提示要求：术语表内的词保留英文（`LLM`、`prompt injection`、`OWASP`、`ATT&CK`…），其余写成通顺的简体中文；数字、版本号、CVE、URL、代码原样保留；
+- 默认提示词适用于各学科课件，不含网络安全示例；只有使用 `--glossary-profile cybersecurity` 时才锁定其专名。数字、序号、URL 和代码应保留；
 - 段落级翻译（不是逐句），保留原文的行结构；
 - 自动保护表情符号与换行符；
 - 同一段出现多次的字符串只翻译一次（去重），并写入缓存复用；
+- 英文为主、夹有少量中文术语注释的段落也会翻译；中文为主的语法讲解保持原样；
 - **术语锁定是硬约束，不是"请求"**：命中的词在发出去之前就被替换成 `[[G1]]` 这样的占位符，模型根本没有机会翻译它，译文写回时再还原成英文。不依赖模型的服从度。
+
+译文报告的 `quality_warnings` 提示新增英文术语、丢失数字或序号、异常短译文。它是审校清单，不是准确率分数。图片文字未经过 OCR，`image_text_review` 只列出面积较大的候选图片。自动行高表格的跨平台状态见 `table_layout`；Windows 上可运行 `pip install -e ".[windows]"` 后让 PowerPoint 测量源行高。
 
 ### 为什么 `--batch-size` 默认是 1
 

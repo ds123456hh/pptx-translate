@@ -13,6 +13,7 @@ we are trying to avoid.
 from __future__ import annotations
 
 import logging
+import math
 
 log = logging.getLogger("pptx_translate.fit")
 
@@ -46,15 +47,11 @@ def est_lines(text: str, width_emu: int, font_pt: float) -> tuple[float, int]:
     if not text:
         return 0.0, 0
     width_emu = max(1, width_emu)
-    if "\x0b" in text or "\n" in text:
-        parts = text.replace("\n", "\x0b").split("\x0b")
-        widths = [sum(_char_em(c) for c in p) * font_pt * EMU_PER_PT for p in parts]
-        return max(widths or [0.0]), max(1, len(parts))
-    chars = sum(_char_em(c) for c in text)
-    total = chars * font_pt * EMU_PER_PT
-    if total <= width_emu:
-        return total, 1
-    return total, max(1, int(total / width_emu + 0.999))
+    parts = text.replace("\n", "\x0b").split("\x0b")
+    widths = [sum(_char_em(c) for c in part) * font_pt * EMU_PER_PT
+              for part in parts]
+    lines = sum(max(1, math.ceil(w / width_emu)) for w in widths)
+    return max(widths or [0.0]), lines
 
 
 def _frame_geometry(shape) -> tuple[int, int, int] | None:
@@ -106,16 +103,12 @@ def _sizes_need_shrink(text: str, usable_w: int, usable_h: int, font_pt: float) 
     """Return the scale to apply when the text clearly overflows, else None."""
     if font_pt <= 1:
         return None
-    total, lines = est_lines(text, usable_w, font_pt)
+    _widest_line, lines = est_lines(text, usable_w, font_pt)
     line_h = font_pt * 1.22 * EMU_PER_PT
-    need_w = total > usable_w * 0.98
     need_h = lines * line_h > usable_h * 0.98
-    if not (need_w or need_h):
+    if not need_h:
         return None
-    ratio = min(
-        (usable_w * 0.98 / total) if need_w and total else 1.0,
-        (usable_h * 0.98 / (lines * line_h)) if need_h and lines else 1.0,
-    )
+    ratio = usable_h * 0.98 / (lines * line_h)
     if ratio >= 0.95 or ratio < MIN_SCALE:
         return None
     return ratio
@@ -237,11 +230,12 @@ def _shrink_table(table, stats: dict, dry_run: bool = False) -> None:
             text = _block_text(tf)
             if not text.strip():
                 continue
-            col_w = int(cell.width or 0) or (col_widths[c] if c < len(col_widths) else 0)
-            if col_w <= 0:
+            col_w = col_widths[c] if c < len(col_widths) else int(table.columns[c].width or 0)
+            if col_w <= 0 or row_h <= 0:
+                stats["unknown_table_rows"] += int(row_h <= 0)
                 continue
             usable_w = col_w - int(tf.margin_left or 0) - int(tf.margin_right or 0)
-            usable_h = (row_h or int(cell.height or 0)) - int(tf.margin_top or 0) - int(tf.margin_bottom or 0)
+            usable_h = row_h - int(tf.margin_top or 0) - int(tf.margin_bottom or 0)
             if usable_w <= 0 or usable_h <= 0:
                 continue
             font_pt = _font_size(tf, cell)
@@ -266,7 +260,7 @@ def shrink_to_fit(prs, include_titles: bool = True, dry_run: bool = False) -> di
 
     ``dry_run`` reports what would change without touching the presentation.
     """
-    stats = {"shapes": 0, "cells": 0, "skip": 0,
+    stats = {"shapes": 0, "cells": 0, "skip": 0, "unknown_table_rows": 0,
              "handled_by_powerpoint": 0, "titles_kept": 0, "would_shrink": []}
     for slide in prs.slides:
         try:

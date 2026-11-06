@@ -8,7 +8,12 @@ from __future__ import annotations
 import re
 import sys
 import zipfile
+import hashlib
+from pathlib import Path
 from pptx import Presentation
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pptx_translate.core import is_blank  # noqa: E402
 
 
 def para_texts(tf) -> list[str]:
@@ -84,6 +89,15 @@ def styles(recs):
     return out
 
 
+def all_records(recs):
+    out = {}
+    for key, rec in recs.items():
+        out[key] = rec
+        if "children" in rec:
+            out.update(all_records(rec["children"]))
+    return out
+
+
 def main() -> int:
     src, dst = Presentation(sys.argv[1]), Presentation(sys.argv[2])
     a, b = list(src.slides), list(dst.slides)
@@ -114,17 +128,28 @@ def main() -> int:
                 style_diff += 1
                 if len(examples) < 18:
                     examples.append(f"slide {idx} {key}: style {sa_[key]} -> {sb_[key]}")
-        for key in set(ra) & set(rb):
-            if "error" in ra[key] or "error" in rb[key]:
+        text_a, text_b = all_records(ra), all_records(rb)
+        for key in set(text_a) & set(text_b):
+            if "error" in text_a[key] or "error" in text_b[key]:
                 continue
-            for pa, pb in zip(ra[key]["paras"], rb[key]["paras"]):
+            for pa, pb in zip(text_a[key]["paras"], text_b[key]["paras"]):
                 if not pa.strip():
                     continue
-                if re.search(r"[A-Za-z]", pa):
+                if not is_blank(pa):
                     if pa == pb:
                         same += 1
                         if len(examples) < 24:
                             examples.append(f"slide {idx} {key}: UNCHANGED {pa[:70]!r}")
+                    else:
+                        changed += 1
+                        if not pb.strip():
+                            empty_after += 1
+            for cell_a, cell_b in zip(text_a[key].get("table", []), text_b[key].get("table", [])):
+                for pa, pb in zip(cell_a, cell_b):
+                    if is_blank(pa):
+                        continue
+                    if pa == pb:
+                        same += 1
                     else:
                         changed += 1
                         if not pb.strip():
@@ -139,8 +164,10 @@ def main() -> int:
         print("   ", line)
 
     with zipfile.ZipFile(sys.argv[1]) as za, zipfile.ZipFile(sys.argv[2]) as zb:
-        ma = {n: len(za.read(n)) for n in za.namelist() if n.startswith("ppt/media/")}
-        mb = {n: len(zb.read(n)) for n in zb.namelist() if n.startswith("ppt/media/")}
+        ma = {n: hashlib.sha256(za.read(n)).hexdigest()
+              for n in za.namelist() if n.startswith("ppt/media/")}
+        mb = {n: hashlib.sha256(zb.read(n)).hexdigest()
+              for n in zb.namelist() if n.startswith("ppt/media/")}
         print("media identical:", ma == mb, f"({len(ma)} files)")
         ta = sum(za.read(n).count(b"<p:timing") for n in za.namelist() if n.endswith(".xml"))
         tb = sum(zb.read(n).count(b"<p:timing") for n in zb.namelist() if n.endswith(".xml"))

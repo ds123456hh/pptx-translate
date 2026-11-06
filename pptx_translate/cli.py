@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import re
 import sys
-import tempfile
 import time
 import zipfile
 from collections import Counter
@@ -19,7 +19,7 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.util import Emu
 
-from . import core, fit, local
+from . import core, fit, local, quality, table_layout
 
 log = logging.getLogger("pptx_translate")
 
@@ -94,8 +94,8 @@ def _safe_print(text: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pptx_translate",
-        description="Translate a .pptx into Chinese in place, preserving every layout, "
-                    "style, shape, animation and image byte-for-byte.",
+        description="Translate a .pptx while retaining its slide structure, styles, "
+                    "animations, and original media; review text fit after translation.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
@@ -144,12 +144,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--glossary", default=None,
                    help="JSON file or CSV 'source,target' lines; overrides the built-in "
                         "proper-noun list (e.g. '\"prompt injection,提示注入\"')")
+    p.add_argument("--glossary-profile", default="none", choices=("none", "cybersecurity"),
+                   help="optional subject glossary; none is safe for general presentations")
     p.add_argument("--no-glossary", action="store_true",
                    help="do not lock any term to English")
     p.add_argument("--strings-json", default=None,
                    help="pre-translated {'source': 'translation'} JSON; skips the API entirely "
                         "(use for human-reviewed or offline translations)")
-    p.add_argument("--keep-terms", default=core.DEFAULT_KEEP_TERMS,
+    p.add_argument("--keep-terms", default=None,
                    help="comma-separated terms the model must leave in English")
     p.add_argument("--cache", default=None,
                    help="translation memory JSON (default: <output>.cache.json)")
@@ -159,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "no-titles (keep title placeholders at their original size), all")
     p.add_argument("--autofit-preview", action="store_true",
                    help="report which shapes overflow after translation, without changing fonts")
+    p.add_argument("--table-layout", default="auto", choices=("auto", "off"),
+                   help="on Windows with PowerPoint and pywin32, freeze automatic row heights to their source rendering")
     p.add_argument("--notes", action="store_true", help="also translate speaker notes")
     p.add_argument("--dry-run", action="store_true", help="list what would be translated, then stop")
     p.add_argument("--report", default=None, help="write a JSON report here")
@@ -235,7 +239,8 @@ def visible_parts(src: Path) -> list[str]:
     return sorted(found)
 
 
-def extract_part_units(src: Path, buckets: dict, skip: set[str]) -> list[core.Unit]:
+def extract_part_units(src: Path, buckets: dict, skip: set[str],
+                       target_language: str = "Simplified Chinese") -> list[core.Unit]:
     """Collect text from chart and diagram data parts."""
     units: list[core.Unit] = []
     with zipfile.ZipFile(src) as zf:
@@ -244,7 +249,7 @@ def extract_part_units(src: Path, buckets: dict, skip: set[str]) -> list[core.Un
         for name in sorted(names):
             xml = zf.read(name)
             for unit in core.extract_part_text(xml, name, buckets):
-                if unit.source in skip or core.is_blank(unit.source):
+                if unit.source in skip or core.is_blank(unit.source, target_language):
                     continue
                 units.append(unit)
     return units
@@ -277,7 +282,7 @@ def apply_unitwise(prs, units: list[core.Unit], resolved: dict[str, str], transl
         frames: list[tuple[object, tuple[str, str]]] = []
 
         def sink(shape, s_no: int, where: str) -> None:
-            label = f"{where}/{shape.name}"
+            label = f"{where}/{shape.shape_id}:{shape.name}"
             if shape.has_text_frame:
                 frames.append((shape.text_frame, (label, "shape")))
             if getattr(shape, "has_table", False) and shape.has_table:
@@ -320,27 +325,40 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(args.output).expanduser() if args.output else default_output(src)
     out = out if out.is_absolute() else (Path.cwd() / out)
+    if out.resolve() == src.resolve():
+        log.error("output must differ from input; choose a new filename with -o")
+        return 2
     cache_path = None if args.no_cache else (Path(args.cache) if args.cache else _sidecar(out, ".cache.json"))
 
-    glossary = dict(core.DEFAULT_GLOSSARY)
+    glossary = (dict(core.CYBERSECURITY_GLOSSARY)
+                if args.glossary_profile == "cybersecurity" else {})
     if args.glossary:
         user_glossary = load_glossary(args.glossary)
         glossary.update(user_glossary)
-        log.info("glossary: %d built-in term(s) plus %d from %s",
-                 len(core.DEFAULT_GLOSSARY), len(user_glossary), args.glossary)
+        log.info("glossary: %d profile term(s) plus %d from %s",
+                 len(glossary) - len(user_glossary), len(user_glossary), args.glossary)
     else:
-        log.info("glossary: %d built-in proper noun(s) locked to English "
-                 "(use --glossary to override)", len(glossary))
+        log.info("glossary: %d term(s), profile %s", len(glossary), args.glossary_profile)
     if args.no_glossary:
         glossary = {}
         log.info("glossary disabled by --no-glossary")
 
     prs = Presentation(str(src))
+    dynamic_rows = table_layout.dynamic_tables(prs)
+    captured_rows: dict[tuple[int, int], list[float]] = {}
+    if dynamic_rows and args.table_layout == "auto" and not args.dry_run:
+        try:
+            captured_rows = table_layout.capture_powerpoint_rows(src, dynamic_rows)
+        except Exception as exc:
+            log.warning("could not capture PowerPoint table layout: %s", exc)
+    if dynamic_rows and not captured_rows:
+        log.warning("%d table(s) have automatic row heights; rendered borders may move after translation",
+                    len(dynamic_rows))
     insp = core.flatten(prs)
     parts = visible_parts(src)
     buckets: dict = {}
     part_source_skip = {u.source for u in insp.units}
-    part_units = extract_part_units(src, buckets, part_source_skip) if parts else []
+    part_units = extract_part_units(src, buckets, part_source_skip, args.target_language) if parts else []
     if parts:
         log.info("chart/diagram parts with text: %d, extra strings: %d", len(buckets), len(part_units))
 
@@ -351,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
             log.info("%d speaker-note paragraph(s) found; pass --notes to translate them", len(notes_only))
 
     todo_units = [u for u in all_units if u.kind != "notes" or args.notes]
-    todo_units = [u for u in todo_units if not core.is_blank(u.text)]
+    todo_units = [u for u in todo_units if not core.is_blank(u.text, args.target_language)]
     sources = [u.text for u in todo_units]
 
     log.info("slides: %d | translatable paragraphs: %d | unique strings: %d | characters: %d",
@@ -372,6 +390,7 @@ def main(argv: list[str] | None = None) -> int:
         "characters": sum(len(s) for s in set(sources)),
         "chart_parts": len(buckets),
         "pictures": len(insp.media),
+        "dynamic_tables": dynamic_rows,
         "provider": args.provider,
         # the real model, not the --model default: for local backends the model
         # name comes from --ollama-model / --local-model
@@ -441,7 +460,9 @@ def main(argv: list[str] | None = None) -> int:
         target_language=args.target_language,
         timeout=args.timeout,
         retries=args.retries,
-        keep_terms=args.keep_terms,
+        keep_terms=(args.keep_terms if args.keep_terms is not None else
+                    core.CYBERSECURITY_KEEP_TERMS
+                    if args.glossary_profile == "cybersecurity" and not args.no_glossary else ""),
     )
     # 'ollama' is an OpenAI-compatible local server, so it shares the HTTP provider.
     provider = core.build_provider(cfg)
@@ -470,7 +491,8 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(mapping, dict):
             log.error("--strings-json must contain a JSON object of source -> translation")
             return 2
-        resolved = {s: str(mapping.get(s, s)) for s in sources}
+        resolved = {s: core.restore_tabs(s, core.preserve_leading_label(s, str(mapping.get(s, s))))
+                    for s in sources}
         translated = sum(1 for s in sources if resolved[s] != s)
         log.info("offline translation map: %d/%d string(s) supplied by %s",
                  translated, len(set(sources)), args.strings_json)
@@ -487,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
             cache_path=cache_path,
             use_cache=not args.no_cache,
             glossary=glossary,
+            simplify=("simplified" in args.target_language.lower()
+                      or "简体" in args.target_language),
         )
         log.debug("cache: path=%s loaded=%d use_cache=%s digest=%s",
                   cache_path, len(translator.cache), not args.no_cache,
@@ -510,10 +534,24 @@ def main(argv: list[str] | None = None) -> int:
         report["untranslated"] = missing[:200]
         report["api_failures"] = len(failures)
 
+    quality_warnings = (quality.audit_units(todo_units, resolved, args.target_language)
+                        if args.provider != "mock" or args.strings_json else [])
+    report["quality_warnings"] = quality_warnings[:200]
+    report["quality_warning_count"] = len(quality_warnings)
+    if quality_warnings:
+        log.warning("%d translation(s) need review; see quality_warnings in the report",
+                    len(quality_warnings))
+
     # ---- write text frames back ------------------------------------------ #
     stats = {"frames": 0}
     apply_unitwise(prs, todo_units, resolved, args.notes, stats)
     log.info("updated %d text frame(s)", stats["frames"])
+
+    stabilized = table_layout.apply_row_heights(prs, captured_rows)
+    report["table_layout"] = {
+        "dynamic": len(dynamic_rows), "stabilized": stabilized,
+        "unresolved": len(dynamic_rows) - stabilized,
+    }
 
     # ---- chart / diagram parts ------------------------------------------- #
     part_updates: dict[str, bytes] = {}
@@ -547,20 +585,26 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             log.warning("auto-fit skipped: %s", exc)
 
-    # ---- save, then splice the parts back in ----------------------------- #
+    # ---- splice only edited XML parts into the original package --------- #
+    # Re-saving the whole Presentation can rewrite unrelated parts, and may
+    # discard package extensions (including VBA in .pptm).  Copying the source
+    # ZIP preserves those parts byte-for-byte.
     out.parent.mkdir(parents=True, exist_ok=True)
-    if part_updates:
-        with tempfile.TemporaryDirectory(prefix="pptx-translate-") as tmp:
-            stage = Path(tmp) / "stage.pptx"
-            prs.save(str(stage))
-            core.rewrite_package(stage, out, part_updates)
-    else:
-        prs.save(str(out))
+    for slide in prs.slides:
+        part_updates[str(slide.part.partname).lstrip("/")] = core.serialize_part(slide._element)
+        if args.notes and slide.has_notes_slide:
+            notes = slide.notes_slide
+            part_updates[str(notes.part.partname).lstrip("/")] = core.serialize_part(notes._element)
+    core.rewrite_package(src, out, part_updates)
 
     # ---- verify ----------------------------------------------------------- #
     verification = verify_output(src, out)
     report["verification"] = verification
-    report["images_with_text"] = _picture_note(insp)
+    report["image_text_review"] = {
+        "ocr_performed": False,
+        "note": "Large pictures may contain text; this is an area-based review list, not OCR evidence.",
+        "candidates": _picture_note(insp),
+    }
     report["elapsed_seconds"] = round(time.time() - started, 1)
 
     if not args.quiet:
@@ -571,11 +615,12 @@ def main(argv: list[str] | None = None) -> int:
                  verification["slides_ok"], verification["pictures"], verification["media"],
                  verification["timing_nodes"])
 
-    if verification["slides"] != insp.slides:
-        log.error("slide count changed: %d -> %d", insp.slides, verification["slides"])
-        return 1
-
     _write_report(args.report or (out.with_suffix(out.suffix + ".report.json")), report)
+    if (verification["slides"] != insp.slides or not verification["media_identical"]
+            or verification["parts_added"] or verification["parts_removed"]
+            or not verification["timing_same"]):
+        log.error("output package differs beyond translated XML; see verification in the report")
+        return 1
     return 0
 
 
@@ -592,13 +637,18 @@ def verify_output(src: Path, out: Path) -> dict:
     """Compare the package skeleton of input and output."""
     with zipfile.ZipFile(src) as a, zipfile.ZipFile(out) as b:
         na, nb = a.namelist(), b.namelist()
-        media_a = {n: len(a.read(n)) for n in na if n.startswith("ppt/media/")}
-        media_b = {n: len(b.read(n)) for n in nb if n.startswith("ppt/media/")}
-        anim = 0
-        for n in nb:
-            if n.endswith(".xml"):
-                data = b.read(n)
-                anim += data.count(b"<p:timing") + data.count(b"<p:anim")
+        media_a = {n: hashlib.sha256(a.read(n)).hexdigest()
+                   for n in na if n.startswith("ppt/media/")}
+        media_b = {n: hashlib.sha256(b.read(n)).hexdigest()
+                   for n in nb if n.startswith("ppt/media/")}
+        def timings(zf, names):
+            count = 0
+            for name in names:
+                if name.endswith(".xml"):
+                    data = zf.read(name)
+                    count += data.count(b"<p:timing") + data.count(b"<p:anim")
+            return count
+        anim_a, anim_b = timings(a, na), timings(b, nb)
     return {
         "slides": sum(1 for n in nb if n.startswith("ppt/slides/slide") and n.endswith(".xml")),
         "slides_ok": sum(1 for n in nb if n.startswith("ppt/slides/slide") and n.endswith(".xml")),
@@ -607,7 +657,8 @@ def verify_output(src: Path, out: Path) -> dict:
         "pictures": sum(1 for n in nb if n.startswith("ppt/media/")),
         "media": len(media_b),
         "media_identical": media_a == media_b,
-        "timing_nodes": anim,
+        "timing_nodes": anim_b,
+        "timing_same": anim_a == anim_b,
         "parts_added": sorted(set(nb) - set(na))[:20],
         "parts_removed": sorted(set(na) - set(nb))[:20],
     }

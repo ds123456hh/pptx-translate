@@ -8,5 +8,5 @@ Public API::
 
 from . import core, fit  # noqa: F401
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = ["core", "fit", "__version__"]

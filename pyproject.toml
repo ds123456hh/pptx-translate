@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pptx-translate"
-version = "1.0.0"
+version = "1.1.0"
 description = "Format-preserving PowerPoint translation: translate .pptx text into another language without changing a single pixel of layout."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -38,6 +38,9 @@ local = [
     "transformers>=4.40",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.2",
+]
+windows = [
+    "pywin32>=306; platform_system == 'Windows'",
 ]
 # Everything needed for the local render check used by scripts/verify_pptx.py.
 dev = [

@@ -4,8 +4,8 @@
 Checks, in order:
   1. the Ollama server answers on /api/version;
   2. the requested model is registered;
-  3. a handful of real deck strings come back translated, with emoji, soft
-     breaks and locked terms intact.
+  3. sample strings from several subjects come back translated, with emoji
+     and soft breaks intact.
 
 Usage::
 
@@ -27,12 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pptx_translate import core  # noqa: E402
 
 SAMPLES = [
-    "What Are LLM",
-    "Prompt Injection",
-    "Tricking LLMs to ignore safety rules (e.g., ‘Forget your rules’).",
-    "🛡️ Simulated Attacks\x0bFriendly knights test your castle walls.",
-    "TTPs (Tactics, Techniques, and Procedures)",
-    "OWASP Top 10 | AI Incident DB | AVID",
+    "Learning objectives",
+    "The new material can improve battery performance.",
+    "Researchers studied how bacteria spread through water.",
+    "🔬 Scientific discovery\x0bExplore how this material works.",
+    "Revenue increased by 18% in 2024.",
+    "Complete the sentences with the words below.",
 ]
 
 
@@ -108,7 +108,7 @@ def main() -> int:
     # the two guarantees that matter for layout, checked explicitly
     emoji_src = SAMPLES[3]
     emoji_out = resolved.get(emoji_src, "")
-    emoji_kept = "🛡️" in emoji_out
+    emoji_kept = "🔬" in emoji_out
     break_kept = "\x0b" in emoji_out
     print(f"\n   emoji preserved : {emoji_kept}   soft break preserved: {break_kept}")
 
