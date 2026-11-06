@@ -19,7 +19,7 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.util import Emu
 
-from . import core, fit, local, quality, table_layout
+from . import commercial_qa, core, fit, local, quality, structure, table_layout
 
 log = logging.getLogger("pptx_translate")
 
@@ -163,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="report which shapes overflow after translation, without changing fonts")
     p.add_argument("--table-layout", default="auto", choices=("auto", "off"),
                    help="on Windows with PowerPoint and pywin32, freeze automatic row heights to their source rendering")
+    p.add_argument("--qa-mode", default="standard", choices=("standard", "commercial"),
+                   help="commercial adds a delivery assessment and fails on detectable blockers; "
+                        "human language and visual review is still required")
     p.add_argument("--notes", action="store_true", help="also translate speaker notes")
     p.add_argument("--dry-run", action="store_true", help="list what would be translated, then stop")
     p.add_argument("--report", default=None, help="write a JSON report here")
@@ -311,9 +314,15 @@ def apply_unitwise(prs, units: list[core.Unit], resolved: dict[str, str], transl
 # main
 # --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    arg_list = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(arg_list)
     setup_logging(args.verbose, args.quiet)
     started = time.time()
+
+    if (args.qa_mode == "commercial" and not args.strings_json and
+            not any(item == "--provider" or item.startswith("--provider=") for item in arg_list)):
+        log.error("commercial mode requires an explicit --provider so the destination of client text is clear")
+        return 2
 
     src = Path(args.input).expanduser()
     if not src.exists():
@@ -363,8 +372,12 @@ def main(argv: list[str] | None = None) -> int:
         log.info("chart/diagram parts with text: %d, extra strings: %d", len(buckets), len(part_units))
 
     all_units = insp.units + part_units
+    untranslated_note_paragraphs = 0
     if not args.notes:
         notes_only = [u for u in all_units if u.kind == "notes"]
+        untranslated_note_paragraphs = sum(
+            not core.is_blank(u.text, args.target_language) for u in notes_only
+        )
         if notes_only:
             log.info("%d speaker-note paragraph(s) found; pass --notes to translate them", len(notes_only))
 
@@ -374,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("slides: %d | translatable paragraphs: %d | unique strings: %d | characters: %d",
              insp.slides, len(todo_units), len(set(sources)), sum(len(s) for s in set(sources)))
+
+    with zipfile.ZipFile(src) as source_zip:
+        embedded_objects = sum(1 for name in source_zip.namelist()
+                               if name.startswith("ppt/embeddings/") and not name.endswith("/"))
 
     if args.dump_strings:
         Path(args.dump_strings).write_text(
@@ -391,6 +408,10 @@ def main(argv: list[str] | None = None) -> int:
         "chart_parts": len(buckets),
         "pictures": len(insp.media),
         "dynamic_tables": dynamic_rows,
+        "untranslated_note_paragraphs": untranslated_note_paragraphs,
+        "embedded_objects": embedded_objects,
+        "input_sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+        "qa_mode": args.qa_mode,
         "provider": args.provider,
         # the real model, not the --model default: for local backends the model
         # name comes from --ollama-model / --local-model
@@ -538,6 +559,9 @@ def main(argv: list[str] | None = None) -> int:
                         if args.provider != "mock" or args.strings_json else [])
     report["quality_warnings"] = quality_warnings[:200]
     report["quality_warning_count"] = len(quality_warnings)
+    report["quality_issue_counts"] = dict(Counter(
+        issue for warning in quality_warnings for issue in warning.get("issues", [])
+    ))
     if quality_warnings:
         log.warning("%d translation(s) need review; see quality_warnings in the report",
                     len(quality_warnings))
@@ -566,12 +590,13 @@ def main(argv: list[str] | None = None) -> int:
     report["chart_values_translated"] = part_changed
 
     # ---- optional auto-fit ------------------------------------------------ #
-    if args.autofit != "off" or args.autofit_preview:
+    if args.autofit != "off" or args.autofit_preview or args.qa_mode == "commercial":
         try:
-            include_titles = args.autofit == "all"
+            include_titles = args.autofit == "all" or args.qa_mode == "commercial"
+            preview_only = args.autofit_preview or args.qa_mode == "commercial" and args.autofit == "off"
             fstats = fit.shrink_to_fit(prs, include_titles=include_titles,
-                                       dry_run=args.autofit_preview)
-            if args.autofit_preview:
+                                       dry_run=preview_only)
+            if preview_only:
                 log.info("autofit preview: %d shape(s) would shrink (titles %s)",
                          len(fstats["would_shrink"]),
                          "included" if include_titles else "kept")
@@ -606,6 +631,15 @@ def main(argv: list[str] | None = None) -> int:
         "candidates": _picture_note(insp),
     }
     report["elapsed_seconds"] = round(time.time() - started, 1)
+    report["output_sha256"] = hashlib.sha256(out.read_bytes()).hexdigest()
+    if args.qa_mode == "commercial":
+        report["visual_structure"] = structure.compare(src, out)
+        report["delivery_assessment"] = commercial_qa.assess(report)
+        if report["delivery_assessment"]["blockers"]:
+            log.error("commercial QA found %d blocker(s); see delivery_assessment in the report",
+                      len(report["delivery_assessment"]["blockers"]))
+        else:
+            log.warning("automatic checks passed; language and rendered-slide review still required")
 
     if not args.quiet:
         _safe_print("")
@@ -621,6 +655,8 @@ def main(argv: list[str] | None = None) -> int:
             or not verification["timing_same"]):
         log.error("output package differs beyond translated XML; see verification in the report")
         return 1
+    if args.qa_mode == "commercial" and report["delivery_assessment"]["blockers"]:
+        return 3
     return 0
 
 

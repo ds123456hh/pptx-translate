@@ -1,0 +1,14 @@
+[
+  {"domain":"medical","source":"The patient received 5 mg/kg of the drug twice daily for 14 days.","must_contain":["患者","14"],"must_preserve":["5 mg/kg"]},
+  {"domain":"research","source":"No statistically significant difference was observed (p = 0.08).","must_contain":["统计学","差异"],"must_preserve":["p = 0.08"]},
+  {"domain":"finance","source":"Total revenue rose by 18% year over year, while net margin fell to 6.2%.","must_contain":["收入","净利率"],"must_preserve":["18%","6.2%"]},
+  {"domain":"legal","source":"The company may terminate this agreement upon 30 days’ written notice.","must_contain":["协议","书面通知"],"must_preserve":["30"]},
+  {"domain":"engineering","source":"Set the torque to 45 N·m and verify the valve remains closed.","must_contain":["扭矩","阀门"],"must_preserve":["45 N·m"]},
+  {"domain":"marketing","source":"Our campaign reached 2.4 million users across three regions.","must_contain":["活动","用户"],"must_preserve":[]},
+  {"domain":"education","source":"Students should compare two sources and cite evidence for their conclusions.","must_contain":["学生","证据"],"must_preserve":[]},
+  {"domain":"operations","source":"Risk level: High; mitigation owner: Operations; due date: Q3 2027.","must_contain":["风险","运营"],"must_preserve":["2027"]},
+  {"domain":"logistics","source":"The lead time will increase from 10 to 15 business days.","must_contain":["交货","工作日"],"must_preserve":["10","15"]},
+  {"domain":"manufacturing","source":"The new process improved production yield by 7%.","must_contain":["良率"],"must_preserve":["7%"]},
+  {"domain":"compliance","source":"The proposed changes are subject to regulatory approval.","must_contain":["监管","批准"],"must_preserve":[]},
+  {"domain":"computing","source":"Median request latency fell below 120 ms.","must_contain":["中位","延迟"],"must_preserve":["120 ms"]}
+]

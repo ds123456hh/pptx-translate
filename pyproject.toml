@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pptx-translate"
-version = "1.1.0"
-description = "Format-preserving PowerPoint translation: translate .pptx text into another language without changing a single pixel of layout."
+version = "1.2.0"
+description = "PowerPoint text translation with package preservation and reviewable quality checks."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

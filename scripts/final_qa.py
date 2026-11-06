@@ -1,83 +1,91 @@
-# -*- coding: utf-8 -*-
-"""Final QA on a translated deck: text integrity, tokens, alignment, samples."""
+"""Check a translated PPTX/PPTM and its matching report before client review.
+
+Usage:
+    python scripts/final_qa.py source.pptx translated.pptx
+    python scripts/final_qa.py source.pptx translated.pptx --report run.report.json
+
+Exit 3 means machine-detectable blockers. Exit 0 means the files passed these
+checks, *not* that linguistic accuracy or rendered layout has been approved.
+"""
+
+from __future__ import annotations
+
 import argparse
+import hashlib
 import json
 import re
 import sys
 import zipfile
+from pathlib import Path
 
-from pptx import Presentation
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pptx_translate import commercial_qa  # noqa: E402
+from pptx_translate import structure  # noqa: E402
+from pptx_translate.cli import verify_output  # noqa: E402
 
-from pptx_translate import core
+TOKEN = re.compile(rb"\[\[[A-Za-z]?\d+\]\]")
 
-SRC = r"D:\大模型渗透测试：大语言模型安全防护教程\1 - Introduction\1 -LLM PENTEST.pptx"
-DST = sys.argv[1] if len(sys.argv) > 1 else r"D:\AI-tools\out\zh-final.pptx"
-REPORT = sys.argv[2] if len(sys.argv) > 2 else r"D:\AI-tools\out\zh-final.report.json"
 
-report = json.load(open(REPORT, encoding="utf-8"))
-print("report: translated=%s untranslated=%s api_failures=%s"
-      % (report.get("translated_strings"), report.get("untranslated_strings"),
-         report.get("api_failures")))
-print("still English:", report.get("untranslated"))
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-print("\n--- leftover placeholder tokens in the package ---")
-with zipfile.ZipFile(DST) as zf:
-    bad = []
-    for name in zf.namelist():
-        if not name.endswith(".xml"):
-            continue
-        data = zf.read(name).decode("utf-8", "replace")
-        for tok in set(re.findall(r"\[\[[A-Za-z]?\d+\]\]", data)):
-            bad.append((name, tok))
-    print("  leftover tokens:", len(bad))
-    for item in bad[:12]:
-        print("   ", item)
 
-print("\n--- paragraph alignment source vs translated ---")
-src_prs, dst_prs = Presentation(SRC), Presentation(DST)
-def units(prs):
-    out = []
-    for i, s in enumerate(prs.slides, 1):
-        for sh in s.shapes:
-            if not sh.has_text_frame:
-                continue
-            for p in sh.text_frame.paragraphs:
-                t = "".join(r.text for r in p.runs)
-                if t.strip():
-                    out.append((i, sh.name, t))
-    return out
-a, b = units(src_prs), units(dst_prs)
-print(f"  paragraphs: source {len(a)} vs translated {len(b)}", "OK" if len(a) == len(b) else "MISMATCH")
-same = [(i, n, t) for (i, n, t), (_j, _m, u) in zip(a, b) if t == u]
-print(f"  identical to source: {len(same)}")
-for row in same[:8]:
-    print("   ", row[0], repr(row[2][:70]))
+def leftover_tokens(path: Path) -> list[str]:
+    hits: list[str] = []
+    with zipfile.ZipFile(path) as package:
+        for name in package.namelist():
+            if name.endswith(".xml"):
+                for token in sorted(set(TOKEN.findall(package.read(name)))):
+                    hits.append(f"{name}: {token.decode('ascii', 'replace')}")
+    return hits
 
-print("\n--- soft-break structure (slide 3 style shapes) ---")
-shown = 0
-for i, s in enumerate(dst_prs.slides, 1):
-    for sh in s.shapes:
-        if not sh.has_text_frame:
-            continue
-        groups = [g for p in sh.text_frame.paragraphs for g in core._paragraph_lines(p)]
-        if len(groups) >= 2:
-            lines = ["".join(n.text or "" for n in g) for g in groups]
-            if any("\x0b" in x for x in lines) or True:
-                print(f"  slide {i} {sh.name}: {len(lines)} lines")
-                for ln in lines[:4]:
-                    print(f"     | {ln}")
-                shown += 1
-                break
-    if shown >= 2:
-        break
 
-print("\n--- sample translations (slide 1, 2) ---")
-for i, s in enumerate(dst_prs.slides, 1):
-    if i > 2:
-        break
-    for sh in s.shapes:
-        if sh.has_text_frame and sh.text_frame.text.strip():
-            for p in sh.text_frame.paragraphs[:6]:
-                t = "".join(r.text for r in p.runs)
-                if t.strip():
-                    print(f"  s{i} | {t}")
+def check(source: Path, output: Path, report_path: Path) -> dict:
+    report = json.loads(report_path.read_text("utf-8"))
+    assessment = commercial_qa.assess(report)
+    blockers = assessment["blockers"]
+    if report.get("input_sha256") != sha256(source):
+        blockers.append("source_does_not_match_report")
+    if report.get("output_sha256") != sha256(output):
+        blockers.append("output_does_not_match_report")
+    current = verify_output(source, output)
+    for key in ("slides", "media_identical", "timing_same", "parts_added", "parts_removed"):
+        if current.get(key) != (report.get("verification") or {}).get(key):
+            blockers.append(f"verification_stale:{key}")
+    if structure.compare(source, output) != report.get("visual_structure"):
+        blockers.append("visual_structure_stale_or_missing")
+    tokens = leftover_tokens(output)
+    if tokens:
+        blockers.append(f"unresolved_tokens_in_package:{len(tokens)}")
+    assessment["status"] = "blocked" if blockers else "manual_review_required"
+    assessment["unresolved_token_examples"] = tokens[:20]
+    assessment["source"] = str(source)
+    assessment["output"] = str(output)
+    assessment["report"] = str(report_path)
+    return assessment
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--report", type=Path)
+    args = parser.parse_args(argv)
+    report = args.report or Path(str(args.output) + ".report.json")
+    for path in (args.source, args.output, report):
+        if not path.is_file():
+            parser.error(f"file not found: {path}")
+    try:
+        assessment = check(args.source, args.output, report)
+    except (ValueError, zipfile.BadZipFile, OSError) as exc:
+        parser.error(str(exc))
+    print(json.dumps(assessment, ensure_ascii=False, indent=2))
+    return 3 if assessment["blockers"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

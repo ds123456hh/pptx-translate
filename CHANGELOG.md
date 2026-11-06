@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-06
+
+### Added
+
+- `--qa-mode commercial` blocks detectable translation and package failures,
+  records shape geometry and run-style comparisons, and marks outputs for
+  independent language and visual review.
+- Generic `scripts/final_qa.py` binds the report to the source/output hashes
+  and rechecks package structure and placeholder residues.
+- Cross-domain model regression examples and a repeatable evaluation script.
+- Measurement-unit change warnings for common medical and engineering units.
+
+### Changed
+
+- README and package description no longer promise pixel-identical rendering.
+
 ## [1.1.0] - 2026-11-06
 
 ### Changed

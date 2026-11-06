@@ -1,6 +1,6 @@
 # pptx-translate
 
-把 `.pptx` / `.pptm` 中的**可编辑文字**翻译成中文（也可指定其他目标语言），保留形状、字体、颜色、项目符号、图片和动画。文字换语言后仍需查看换行与密集表格；图片中的字需要单独重制。
+把 `.pptx` / `.pptm` 中的**可编辑文字**翻译成中文（也可指定其他目标语言），尽量保留形状、字体、颜色、项目符号、图片和动画。文字换语言后必须查看换行、遮挡与密集表格；图片中的字需要单独处理。商用交付流程见 [docs/COMMERCIAL-READINESS.md](docs/COMMERCIAL-READINESS.md)。
 
 ```
 输入 deck.pptx  ──►  就地替换文字节点  ──►  deck.zh-CN.pptx
@@ -20,14 +20,14 @@
 
 ---
 
-## 为什么排版不会变
+## 结构保护与排版风险
 
-**核心做法：就地替换文字节点，绝不重建形状。**
+**核心做法：就地替换文字节点，不重建形状。** 这可以保护几何和样式数据，但中文与英文的字宽、换行不同，仍可能产生可见遮挡或溢出。
 
 - 每个 run 的 `rPr`（字体、字号、加粗、颜色、超链接）原样保留，只改 `<a:t>` 里的字；
-- 手动换行 `<a:br/>`、段落 `pPr`（项目符号、缩进、行距）保留骨架，译文**一行对一行**；
+- 手动换行 `<a:br/>`、段落 `pPr`（项目符号、缩进、行距）保留骨架；实际显示行数仍可能变化；
 - 同一段里多种格式（加粗词、高亮词）按原 run 长度比例切分，且**每个 run 至少一个字**，不会出现空 run 导致格式丢失；
-- 表情符号 😀🛡️ 先替换成 `[[E1]]` 占位符再送翻译，译后还原——模型物理上不可能丢掉它；
+- 表情符号 😀🛡️ 先替换成 `[[E1]]` 占位符再送翻译，译后还原；占位符异常会进入质量报告；
 - 图表 / SmartArt 文字直接改写 `chart*.xml` / `diagrams/data*.xml`（`<a:t>` 与 `strCache` 里的 `<c:v>`），数值缓存不动。
 
 详见 [docs/usage.md](docs/usage.md)。
@@ -136,6 +136,7 @@ pptx-translate deck.pptx --provider mock              # 不联网，验证全流
 | `--autofit` | `off` | `off` / `no-titles` / `all`，中文变长时是否缩字号 |
 | `--autofit-preview` | 关 | 只报告会溢出的框，不改字号 |
 | `--table-layout` | `auto` | 有 PowerPoint 与 pywin32 时固定原稿自动行高；`off` 仅报告风险 |
+| `--qa-mode` | `standard` | `commercial` 增加交付判定，检出漏译/数字或单位异常时返回非零状态 |
 | `--notes` | 关 | 同时翻译演讲者备注 |
 | `--cache` / `--no-cache` | `<输出>.cache.json` | 翻译记忆，失败不写入，可断点续跑 |
 
@@ -170,7 +171,7 @@ pptx-translate security.pptx --glossary-profile cybersecurity
 
 一次只发一段，从结构上消除歧义。代价只是请求数变多；配合翻译记忆，重跑几乎不花时间。
 
-> 换成通用对话模型（DeepSeek、GPT 等）对多段输出服从度好，可把 `--batch-size` 调到 10~20 提速。
+> 商用流程建议维持默认 `--batch-size 1`，避免段落错位；确需加速时先用对应模型验证批量返回的对位准确率。
 
 ---
 
@@ -180,6 +181,7 @@ pptx-translate security.pptx --glossary-profile cybersecurity
 - **嵌入的 OLE 对象**（`ppt/embeddings/*.xlsx`）不翻译。
 - 只支持 `.pptx` / `.pptm`；老的 `.ppt` 请先另存为 pptx。
 - 译文由模型生成；报告的 `quality_warnings` 会标出新增英文术语、丢失的数字、异常短译文等，但人工审校仍然必要。
+- 自动质量检查不能判断专业术语是否准确，也不能证明每一页渲染后没有遮挡。
 - 自动行高表格在未安装 PowerPoint/pywin32 的环境中可能改变视觉行高；查看报告的 `table_layout.unresolved`。
 
 ---
@@ -198,8 +200,17 @@ python scripts/verify_pptx.py 原文件.pptx 译后文件.pptx
 单元测试（不需要网络、不需要模型）：
 
 ```bash
-python tests/test_roundtrip.py     # 26 项
+python -m pytest -q              # 翻译、结构和商用门禁回归
 ```
+
+商用候选稿建议运行：
+
+```bash
+pptx-translate deck.pptx --provider ollama --qa-mode commercial --autofit-preview
+python scripts/final_qa.py deck.pptx deck.zh-CN.pptx
+```
+
+自动检查通过时仍会标记 `manual_review_required`，需要审校译文和逐页查看渲染效果。
 
 ---
 
@@ -212,6 +223,8 @@ pptx_translate/
   local.py        进程内 HuggingFace provider（可选，需 torch）
   fit.py          溢出检测与保守缩放
   quality.py      译文异常检查
+  commercial_qa.py 商用交付判定（只判机器可检风险）
+  structure.py    形状几何与文字样式独立比对
   table_layout.py 自动行高表格的原稿测量与固定
 tests/
   test_roundtrip.py
@@ -220,10 +233,12 @@ scripts/
   download_model.ps1         下载 Hy-MT2 1.8B GGUF（镜像回退 + 断点续传）
   ollama_smoke_test.py       验证本地服务与管线（表情/换行/术语）
   verify_pptx.py             源/译结构样式比对
-  final_qa.py                交付前质检（占位符残留、段落对齐）
+  final_qa.py                交付前核对报告哈希、结构与占位符
+  evaluate_model.py          跨领域本地模型回归
   render_with_font_fallback.mjs  用指定字体回退渲染页面，便于目视
 docs/
   usage.md                    完整用法
+  COMMERCIAL-READINESS.md     商用候选稿验收范围和流程
   local-ollama.md             本地部署傻瓜式指南
 examples/
   glossary.csv / strings-zh.json.example

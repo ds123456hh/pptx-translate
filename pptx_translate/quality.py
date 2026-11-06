@@ -16,6 +16,12 @@ LATIN_WORD = re.compile(r"[A-Z]{2,}(?:[&/-][A-Z0-9]+)+|[A-Za-z]{4,}")
 NUMBER = re.compile(r"(?<![A-Za-z\d])\d+(?:[.,]\d+)*(?:%|％)?(?![A-Za-z\d])")
 LEADING_LABEL = re.compile(r"^\s*((?:\d{1,3}|[A-F])(?:[.)、．])?)\s+")
 PLACEHOLDER = re.compile(r"\[\[[A-Za-z]?\d+\]\]")
+MEASUREMENT = re.compile(
+    r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?\s*"
+    r"(mg/kg|µg/kg|μg/kg|mmHg|kPa|MPa|kWh|MWh|km/h|m/s|N[·.]m|"
+    r"µg|μg|mg|kg|mL|ml|GB|MB|TB|GHz|MHz|kHz|Hz|°C|℃|°F)"
+    r"(?=$|[\s,.;:，。；）)])"
+)
 
 
 def issues_for(source: str, target: str, target_language: str) -> list[str]:
@@ -30,6 +36,10 @@ def issues_for(source: str, target: str, target_language: str) -> list[str]:
     missing_numbers = Counter(NUMBER.findall(source)) - Counter(NUMBER.findall(target))
     if missing_numbers:
         issues.append("numbers_missing")
+    source_units = Counter(unit for unit in MEASUREMENT.findall(source))
+    target_units = Counter(unit for unit in MEASUREMENT.findall(target))
+    if source_units - target_units:
+        issues.append("measurement_units_changed")
     if "chinese" in target_language.lower() or "中文" in target_language:
         introduced = {w.lower() for w in LATIN_WORD.findall(target)} - {
             w.lower() for w in LATIN_WORD.findall(source)
